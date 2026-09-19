@@ -41,3 +41,8 @@ def _run(*args):
 @app.function(**gpu_job)
 def build_readout(positions: int = 4000, keep: int = 2048):
     _run("/root/scripts/build_readout.py", str(positions), str(keep))
+
+
+@app.function(**{**gpu_job, "timeout": 3 * 3600})
+def fly_games(first: int = 5000, last: int = 5016, control: str = "none"):
+    _run("/root/scripts/fly_games.py", str(first), str(last), control)

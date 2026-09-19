@@ -1,11 +1,12 @@
 """Build the fly's 2048 readout: teacher positions -> connectome spikes -> ridge readout.
 
-1. Teacher games (seeds from 100,000) give positions; every legal swipe from each one is scored by the
-   expectimax teacher. Scores are centered and scaled within each position, since only the ranking of
-   swipes matters.
-2. Each swipe is shown to the connectome as one continuous transition: the current board for 75 ms,
-   then the board after the swipe for 75 ms, through the 2048 eyes. The 3,555 L1/L2 neurons' spike
-   counts are recorded.
+1. Teacher games (seeds from 100,000) give positions. Every legal swipe from each one is scored with
+   one layer of lookahead: the average, over every new tile that could appear, of the best next board
+   under the teacher's heuristic. (A no-brain study showed this target makes the best one-look readout;
+   see scripts/target_study.py.) Scores are centered and scaled within each position, since only the
+   ranking of swipes matters.
+2. Each swipe's resulting board is shown to the connectome for 150 ms through the 2048 eyes, and the
+   3,555 L1/L2 neurons' spike counts are recorded.
 3. On positions from training games, neurons are ranked by how well they track the teacher; the best
    `keep` feed a ridge readout. Held-out games give top-swipe agreement with the teacher. The same
    readout fit directly on the eye inputs (no brain) is reported as a baseline.
@@ -26,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 from fly2048.brain import Brain, load_neurons
 from fly2048.eyes import Eyes, board_channels
 from fly2048.game import Game
-from fly2048.teacher import swipe_values, teacher_move
+from fly2048.teacher import chance_value, swipe_values, teacher_move
 
 N_POSITIONS = int(sys.argv[1]) if len(sys.argv) > 1 else 4000
 KEEP = int(sys.argv[2]) if len(sys.argv) > 2 else 2048
@@ -68,8 +69,18 @@ def collect_positions():
     return data
 
 
+def lookahead_target(data):
+    """One-lookahead-layer value of each after-swipe board, standardized within its position."""
+    raw = np.array([chance_value(np.uint64(a), 1, 1.0) for a in data["after"]])
+    out = np.empty_like(raw)
+    for g in np.unique(data["group"]):
+        idx = data["group"] == g
+        out[idx] = (raw[idx] - raw[idx].mean()) / max(raw[idx].std(), 1e-6)
+    return out
+
+
 def simulate(data):
-    cache = OUT / "spikes.npz"
+    cache = OUT / "spikes_after.npz"
     if cache.exists():
         with np.load(cache) as z:
             return z["counts"].astype(np.float32), z["neurons"]
@@ -82,8 +93,7 @@ def simulate(data):
     started = time.time()
     for start in range(0, n, BATCH):
         stop = min(start + BATCH, n)
-        p0, p1 = eyes.probs(data["before"][start:stop]), eyes.probs(data["after"][start:stop])
-        c, _ = brain.run(eyes.in_idx, p0, STEPS, rec, eyes.phase, p_in_after=p1, switch_step=STEPS // 2)
+        c, _ = brain.run(eyes.in_idx, eyes.probs(data["after"][start:stop]), STEPS, rec, eyes.phase)
         counts[start:stop] = c.T.cpu().numpy()
         print(f"simulated {stop}/{n} swipes, {time.time() - started:.0f}s", flush=True)
     np.savez(cache, counts=counts, neurons=rec_np)
@@ -126,7 +136,7 @@ def fit_ridge(x, target, group, train, label):
 def main():
     data = collect_positions()
     counts, rec_np = simulate(data)
-    target, group = data["target"], data["group"].astype(np.int64)
+    target, group = lookahead_target(data), data["group"].astype(np.int64)
     games = np.unique(data["game"])
     test_games = games[-max(2, len(games) // 5):]
     train = ~np.isin(data["game"], test_games)
@@ -140,11 +150,11 @@ def main():
     selected = np.argsort(-np.abs(corr), kind="stable")[:KEEP]
     fly = fit_ridge(counts[:, selected], target, group, train, f"fly, {KEEP} L1/L2 neurons")
 
-    eye_x = np.concatenate([board_channels(data["before"]), board_channels(data["after"])], 1)
-    eyes_only = fit_ridge(eye_x, target, group, train, "no brain, 64 eye inputs")
+    eyes_only = fit_ridge(board_channels(data["after"]), target, group, train, "no brain, 32 eye inputs")
 
     np.savez(OUT / "readout.npz", neuron_idx=rec_np[selected], mean=fly[3], scale=fly[4], weights=fly[2],
-             steps=STEPS, heldout_agreement=fly[0], ridge_lambda=fly[1])
+             steps=STEPS, heldout_agreement=fly[0], ridge_lambda=fly[1], stimulus="after", target="one_lookahead_layer")
+    np.savez(OUT / "readout_nobrain.npz", mean=eyes_only[3], scale=eyes_only[4], weights=eyes_only[2])
     report = {
         "positions": int(group.max() + 1), "swipes": int(len(target)), "teacher_games": len(games),
         "test_games": [int(g) for g in test_games], "chance_agreement": float(chance),
