@@ -4,3 +4,4 @@ __pycache__/
 runs/
 renders/
 *.npz
+!results/*.npz

@@ -1,0 +1,16 @@
+{
+  "positions": 4000,
+  "swipes": 14837,
+  "teacher_games": 10,
+  "test_games": [
+    100008,
+    100009
+  ],
+  "chance_agreement": 0.27895833333333336,
+  "fly_agreement": 0.6225,
+  "fly_lambda": 10000,
+  "neurons_kept": 2048,
+  "no_brain_agreement": 0.61,
+  "no_brain_lambda": 1000,
+  "mean_l1l2_spikes": 5.300919055938721
+}
