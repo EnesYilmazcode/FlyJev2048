@@ -2,8 +2,9 @@
 
 usage: python video/render2048.py <seed> [out.mp4] [fps]
 Reads runs/fly-none/<seed>.json and runs/jev-rules/<seed>.json. Both games share one move clock: move k
-starts at the same moment on both boards. The pace starts slow and speeds up, so a 1,000-move game fits
-in about 20 seconds.
+starts at the same moment on both boards. The pace starts slow and speeds up; once the first player is
+out, the survivor fast-forwards harder, slows down for its biggest merge, then races to its last move.
+Sound comes from video/sound.py and is muxed in with ffmpeg.
 """
 import json
 import subprocess
@@ -15,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from replay import replay
+from sound import mix, write_wav
 
 ROOT = Path(__file__).resolve().parents[1]
 W, H, S = 1800, 1200, 2                                   # output size, supersampling factor
@@ -27,6 +29,8 @@ BOARDS = {"fly": (W * 0.27 - BOARD_PX / 2, 400), "jev": (W * 0.73 - BOARD_PX / 2
 LABELS = {"fly": "Fly", "jev": "Jev"}
 FONT = "C:/Windows/Fonts/segoeuib.ttf"
 INTRO, OUTRO, D0, DECAY, DMIN = 0.9, 2.2, 0.16, 0.975, 0.012
+DFAST, FAST_DECAY = 0.0025, 0.985                         # after the first player is out
+SLOWMO = [0.03, 0.05, 0.08, 0.12, 0.16, 0.34]             # the moves leading into the biggest merge
 
 
 def font(size):
@@ -37,8 +41,27 @@ def ease(x):
     return 1 - (1 - x) ** 3
 
 
-def durations(n):
-    return np.maximum(DMIN, D0 * DECAY ** np.arange(n))
+def durations(n, k_out=None, k_peak=None):
+    """Seconds per move. k_out: first move after the first player is out; k_peak: the biggest merge."""
+    d = np.maximum(DMIN, D0 * DECAY ** np.arange(n))
+    if k_out is not None:
+        ks = np.arange(k_out, n)
+        d[k_out:] = np.maximum(DFAST, DMIN * FAST_DECAY ** (ks - k_out))
+    if k_peak is not None:
+        for i, sec in enumerate(SLOWMO):
+            k = k_peak - (len(SLOWMO) - 1) + i
+            if 0 <= k < n:
+                d[k] = max(d[k], sec)
+    return d
+
+
+def peak_move(steps):
+    """Index of the move whose merge first makes the game's biggest tile."""
+    best = max(t.exp for t in steps[-1]["after"].values())
+    for k, step in enumerate(steps):
+        if any(m[0].exp == best for m in step["merges"]):
+            return k
+    return None
 
 
 def cell_xy(board, r, c):
@@ -142,15 +165,18 @@ def main():
         rec = json.loads((ROOT / "runs" / folder / f"{seed}.json").read_text(encoding="utf8"))
         games[board] = replay(seed, rec["moves"])
     longest = max(len(g[1]) for g in games.values())
-    durs = durations(longest)
+    shortest = min(len(g[1]) for g in games.values())
+    winner = max(games, key=lambda b: len(games[b][1]))
+    durs = durations(longest, k_out=shortest if shortest < longest else None, k_peak=peak_move(games[winner][1]))
     starts = INTRO + np.concatenate([[0], np.cumsum(durs)[:-1]])
     end_of = {b: starts[len(g[1]) - 1] + durs[len(g[1]) - 1] for b, g in games.items()}
     total = max(end_of.values()) + OUTRO
     first_out = min(end_of, key=end_of.get)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
+    silent = str(Path(out).with_suffix(".silent.mp4"))
     ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
                            "-r", str(fps), "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "16",
-                           "-pix_fmt", "yuv420p", "-movflags", "+faststart", out], stdin=subprocess.PIPE)
+                           "-pix_fmt", "yuv420p", "-movflags", "+faststart", silent], stdin=subprocess.PIPE)
     n_frames = int(total * fps)
     for i in range(n_frames):
         t = i / fps
@@ -168,6 +194,32 @@ def main():
             print(f"frame {i}/{n_frames}", flush=True)
     ff.stdin.close()
     ff.wait()
+
+    # Sound: ticks and merges while the pace allows it; only big merges during the fast-forward.
+    events, last_chime = [], -1.0
+    for board, (start, steps) in games.items():
+        pan = -0.55 if board == "fly" else 0.55
+        for k, step in enumerate(steps):
+            t0, d = starts[k], durs[k]
+            if d >= 0.03:
+                events.append((t0, "tick", pan, 0))
+            if step["merges"]:
+                big = max(m[0].exp for m in step["merges"])
+                if d >= 0.03 or (big >= 8 and t0 - last_chime > 0.09):
+                    events.append((t0 + 0.55 * d, "merge", pan, big))
+                    if d < 0.03:
+                        last_chime = t0
+        if board == first_out:
+            events.append((end_of[board] + 0.25, "fall", pan, 0))
+    k_peak = peak_move(games[winner][1])
+    if k_peak is not None:
+        events.append((starts[k_peak] + 0.55 * durs[k_peak], "chord", -0.3, 0))
+    wav = Path(out).with_suffix(".wav")
+    write_wav(wav, mix(sorted(events), total))
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", silent, "-i", str(wav), "-map", "0:v", "-map", "1:a",
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", out], check=True)
+    Path(silent).unlink()
+    wav.unlink()
     print(f"wrote {out}: {total:.1f}s, fly {len(games['fly'][1])} moves, jev {len(games['jev'][1])} moves")
 
 
