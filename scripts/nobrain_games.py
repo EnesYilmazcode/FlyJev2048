@@ -1,5 +1,6 @@
-"""Baseline: the same ridge readout fit straight on the eye inputs (no connectome), playing seeded games.
-Fits on the teacher positions in runs/readout/positions.npz. usage: python scripts/nobrain_games.py <first> <last>"""
+"""Baseline: the build's no-brain readout (same data and target as the fly, fit straight on the 32 eye
+inputs) playing seeded games. usage: python scripts/nobrain_games.py <first> <last>"""
+import json
 import sys
 from pathlib import Path
 
@@ -10,25 +11,21 @@ sys.path.insert(0, str(ROOT))
 from fly2048.eyes import board_channels
 from fly2048.game import Game
 
-with np.load(ROOT / "runs" / "readout" / "positions.npz") as z:
-    before, after, target = z["before"], z["after"], z["target"]
-x = np.concatenate([board_channels(before), board_channels(after)], 1).astype(np.float64)
-scale = x.std(0)
-scale[scale < 1e-6] = 1
-z = x / scale
-w = np.linalg.solve(z.T @ z + 1000 * np.eye(z.shape[1]), z.T @ target)
-
-maxes, scores = [], []
+with np.load(ROOT / "runs" / "readout" / "readout_nobrain.npz") as z:
+    scale, w = z["scale"], z["weights"]
+out = ROOT / "runs" / "nobrain"
+out.mkdir(parents=True, exist_ok=True)
+scores = []
 for seed in range(int(sys.argv[1]), int(sys.argv[2])):
-    game = Game(seed)
+    game, moves = Game(seed), []
     while not game.over:
-        options = game.afterstates()
-        moves = list(options)
-        b = np.full(len(moves), game.board, np.uint64)
-        a = np.array([options[m][0] for m in moves], np.uint64)
-        s = (np.concatenate([board_channels(b), board_channels(a)], 1) / scale) @ w
-        game.step(moves[int(np.argmax(s))])
-    maxes.append(game.max_tile)
+        opts = game.afterstates()
+        options = list(opts)
+        s = (board_channels([opts[m][0] for m in options]) / scale) @ w
+        moves.append(options[int(np.argmax(s))])
+        game.step(moves[-1])
     scores.append(game.score)
+    (out / f"{seed}.json").write_text(json.dumps({"seed": seed, "score": game.score, "max_tile": game.max_tile,
+                                                   "n_moves": game.moves, "moves": moves}), encoding="utf8")
     print(f"seed {seed}: max {game.max_tile}, score {game.score}, moves {game.moves}", flush=True)
-print(f"mean score {np.mean(scores):.0f}")
+print(f"no brain: {len(scores)} games, mean score {np.mean(scores):.0f}")
