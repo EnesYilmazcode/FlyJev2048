@@ -23,7 +23,7 @@ TILE = {1: "#eee4da", 2: "#ede0c8", 3: "#f2b179", 4: "#f59563", 5: "#f67c5f", 6:
         8: "#edcc61", 9: "#edc850", 10: "#edc53f", 11: "#edc22e"}
 BOARD_PX, GAP = 640, 14
 CELL = (BOARD_PX - 5 * GAP) / 4
-BOARDS = {"fly": (W * 0.27 - BOARD_PX / 2, 330), "jev": (W * 0.73 - BOARD_PX / 2, 330)}
+BOARDS = {"fly": (W * 0.27 - BOARD_PX / 2, 400), "jev": (W * 0.73 - BOARD_PX / 2, 400)}
 LABELS = {"fly": "Fly", "jev": "Jev"}
 FONT = "C:/Windows/Fonts/segoeuib.ttf"
 INTRO, OUTRO, D0, DECAY, DMIN = 0.9, 2.2, 0.16, 0.975, 0.012
@@ -70,13 +70,13 @@ def draw_board_frame(d, board):
 
 def draw_header(d, board, score):
     x0, y0 = BOARDS[board]
-    f = font(76)
-    d.text((x0 * S, (y0 - 118) * S), LABELS[board], font=f, fill=DARK)
-    bw, bh = 170, 74
-    bx, by = x0 + BOARD_PX - bw, y0 - 106
-    d.rounded_rectangle([bx * S, by * S, (bx + bw) * S, (by + bh) * S], radius=6 * S, fill=BOARD)
-    small, big = font(17), font(32)
-    for text, fnt, yy, fill in (("SCORE", small, by + 18, "#eee4da"), (f"{score:,}", big, by + 48, "white")):
+    f = font(118)
+    d.text((x0 * S, (y0 - 44) * S), LABELS[board], font=f, fill=DARK, anchor="ls")   # shared baseline
+    bw, bh = 250, 112
+    bx, by = x0 + BOARD_PX - bw, y0 - 30 - bh
+    d.rounded_rectangle([bx * S, by * S, (bx + bw) * S, (by + bh) * S], radius=8 * S, fill=BOARD)
+    small, big = font(24), font(52)
+    for text, fnt, yy, fill in (("SCORE", small, by + 26, "#eee4da"), (f"{score:,}", big, by + 72, "white")):
         bbox = d.textbbox((0, 0), text, font=fnt)
         d.text(((bx + bw / 2) * S - (bbox[2] + bbox[0]) / 2, yy * S - (bbox[3] + bbox[1]) / 2), text, font=fnt, fill=fill)
 
@@ -146,6 +146,7 @@ def main():
     starts = INTRO + np.concatenate([[0], np.cumsum(durs)[:-1]])
     end_of = {b: starts[len(g[1]) - 1] + durs[len(g[1]) - 1] for b, g in games.items()}
     total = max(end_of.values()) + OUTRO
+    first_out = min(end_of, key=end_of.get)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
                            "-r", str(fps), "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "16",
@@ -158,8 +159,8 @@ def main():
         for board, (start, steps) in games.items():
             score = board_at(d, board, start, steps, t, starts, durs)
             draw_header(d, board, score)
-        for board in games:
-            if t > end_of[board] + 0.25:
+        for board in games:                      # only the player who runs out first gets the overlay,
+            if board == first_out and t > end_of[board] + 0.25:   # so the video ends on the winner's board
                 draw_game_over(img, board, min(1.0, (t - end_of[board] - 0.25) / 0.4))
         frame = img.convert("RGB").resize((W, H), Image.LANCZOS)
         ff.stdin.write(frame.tobytes())
